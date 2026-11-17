@@ -1,0 +1,11 @@
+# Dependencias
+node_modules/
+
+# Build
+dist/
+
+# Secretos (DATABASE_URL, ANTHROPIC_API_KEY, ...)
+.env
+
+# Logs
+*.log
