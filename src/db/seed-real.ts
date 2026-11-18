@@ -845,6 +845,16 @@ async function seedReal(): Promise<void> {
     console.log(`✅ Seeding completado: ${SEED_QUESTIONS.length} preguntas verificadas (10 por materia).`);
 }
 
+// Kill switch: los upserts pisan enunciados, opciones y respuestas de preguntas existentes.
+if (process.env.NODE_ENV === 'production' && !process.argv.includes('--allow-production')) {
+    console.error(
+        '⛔ Seed abortado: NODE_ENV=production. Sobrescribiría el banco de preguntas real.\n' +
+            '   Si de verdad querés sembrar producción, corré: pnpm db:seed -- --allow-production',
+    );
+    await closeDatabaseConnection();
+    process.exit(1);
+}
+
 try {
     await seedReal();
 } finally {

@@ -6,6 +6,8 @@ import { jsonSchemaTransform, serializerCompiler, validatorCompiler, ZodTypeProv
 import { z } from 'zod';
 import { questionsRoutes } from './routes/questions.js';
 import { attemptsRoutes } from './routes/attempts.js';
+import { statsRoutes } from './routes/stats.js';
+import { chatRoutes } from './routes/chat.js';
 import { closeDatabaseConnection } from './db/index.js';
 import { authPlugin } from './plugins/auth.js';
 import { allowedOrigins } from './config/env.js';
@@ -93,6 +95,8 @@ app.register(swaggerUi, {
 // Rutas de la aplicación
 app.register(questionsRoutes);
 app.register(attemptsRoutes);
+app.register(statsRoutes);
+app.register(chatRoutes);
 
 // Ruta de prueba (Healthcheck)
 app.get('/health', {

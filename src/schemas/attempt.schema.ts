@@ -23,6 +23,15 @@ export const submitAttemptBodySchema = z.object({
         .meta({ description: 'Timestamp (ms) o fecha ISO de finalización del intento.' }),
 });
 
+export const attemptQuestionOptionSchema = z.object({
+    key: z.string(),
+    text: z.string(),
+});
+
+export const attemptDetailParamsSchema = z.object({
+    id: z.uuid().meta({ description: 'UUID del intento registrado.' }),
+});
+
 export const subjectScoreBreakdownSchema = z.object({
     subjectId: z.uuid(),
     subjectCode: z.string(),
@@ -37,6 +46,11 @@ export const questionCorrectionItemSchema = z.object({
     subjectId: z.uuid(),
     subjectCode: z.string(),
     subjectName: z.string(),
+    topic: z.string(),
+    statementMd: z.string(),
+    imageUrl: z.string().nullable(),
+    options: z.array(attemptQuestionOptionSchema),
+    difficulty: z.string().nullable(),
     selectedKey: z.string().nullable(),
     correctKey: z.string(),
     isCorrect: z.boolean(),
@@ -64,3 +78,21 @@ export const submitAttemptResponseSchema = z.object({
 
 export type SubmitAttemptBody = z.infer<typeof submitAttemptBodySchema>;
 export type SubmitAttemptResponse = z.infer<typeof submitAttemptResponseSchema>;
+
+export const attemptHistoryItemSchema = z.object({
+    id: z.uuid(),
+    score: z.number().int(),
+    totalQuestions: z.number().int(),
+    percentage: z.number(),
+    status: z.enum(['in_progress', 'completed']),
+    startTime: z.string(),
+    endTime: z.string(),
+    createdAt: z.string(),
+});
+
+export const attemptHistoryResponseSchema = z.object({
+    data: z.array(attemptHistoryItemSchema),
+});
+
+export type AttemptHistoryItem = z.infer<typeof attemptHistoryItemSchema>;
+export type AttemptHistoryResponse = z.infer<typeof attemptHistoryResponseSchema>;

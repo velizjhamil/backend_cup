@@ -5,9 +5,12 @@
   "main": "index.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
+    "build": "tsc -b",
+    "start": "node dist/src/server.js",
     "api:gen": "tsx scripts/generate-openapi.ts",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/db/migrate.ts",
+    "db:migrate:prod": "node dist/src/db/migrate.js",
     "db:seed": "tsx src/db/seed-real.ts",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio"
@@ -27,6 +30,7 @@
     "@fastify/cors": "^11.4.3",
     "@fastify/swagger": "^9.9.4",
     "@fastify/swagger-ui": "^6.1.4",
+    "@google/generative-ai": "^0.24.1",
     "better-auth": "^1.7.25",
     "dotenv": "^18.0.10",
     "drizzle-orm": "^0.45.4",
