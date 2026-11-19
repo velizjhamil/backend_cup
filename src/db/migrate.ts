@@ -2,9 +2,17 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import { migrate } from 'drizzle-orm/postgres-js/migrator';
 import postgres from 'postgres';
 import 'dotenv/config';
+import { buildPostgresOptions } from './connection-options.js';
 
-// Usamos la misma conexión directa que probaste hace rato y sí funcionó
-const sql = postgres(process.env.DATABASE_URL as string, { max: 1 });
+const connectionString = process.env.DATABASE_URL;
+
+if (!connectionString) {
+    console.error('❌ DATABASE_URL no está definida: no hay a qué base migrar.');
+    process.exit(1);
+}
+
+// Misma configuración que la API: SSL y `prepare: false` contra Supabase.
+const sql = postgres(connectionString, buildPostgresOptions(connectionString, 1));
 const db = drizzle(sql);
 
 async function main() {

@@ -1,0 +1,41 @@
+# Render Blueprint: Web Service for the CUP Simulacro API.
+# Docs: https://render.com/docs/blueprint-spec
+# Variables marked `sync: false` are secrets: Render asks for them in the
+# dashboard when the Blueprint is created and never stores them in this file.
+services:
+  - type: web
+    name: cup-simulacro-api
+    runtime: node
+    plan: free
+    # rootDir is only needed if this repo is ever deployed from a monorepo.
+    buildCommand: pnpm install --prod=false && pnpm build
+    startCommand: pnpm start
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      # Supabase > Connect > Transaction pooler (port 6543, IPv4).
+      - key: DATABASE_URL
+        sync: false
+      # At least 32 characters. Render can generate it.
+      - key: BETTER_AUTH_SECRET
+        generateValue: true
+      # PUBLIC Vercel URL (the browser talks to /api through the rewrite),
+      # e.g. https://cup-simulacro.vercel.app
+      - key: BETTER_AUTH_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      # Optional: extra origins separated by commas (custom domain, previews).
+      - key: CORS_ORIGINS
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash
+      # GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET are NOT listed on purpose:
+      # env.ts rejects them when empty. Add both by hand in the dashboard
+      # once the Google OAuth credentials exist.

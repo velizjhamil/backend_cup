@@ -20,6 +20,10 @@ import { allowedOrigins } from './config/env.js';
  */
 export const app = Fastify({
     logger: true,
+    // Render (y el rewrite de Vercel) ponen un proxy inverso delante: sin esto
+    // `request.ip` sería la IP del proxy y el límite diario de IA para
+    // invitados (`ip:<ip>` en routes/chat.ts) se compartiría entre todos.
+    trustProxy: true,
 }).withTypeProvider<ZodTypeProvider>();
 
 // Configuración para usar Zod en la validación
