@@ -1,3 +1,4 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { GoogleGenerativeAI, type Content } from '@google/generative-ai';
 import { env, isGeminiEnabled } from '../config/env.js';
 import type { QuestionOption } from '../db/schema.js';
@@ -259,9 +260,141 @@ function splitChatMessagesForGemini(messages: readonly ChatMessage[]): {
     };
 }
 
+/*
+ * Resilience for Gemini calls.
+ *
+ * Measured on 2026-11-18: under high demand the primary model answered 503 only
+ * after ~214 s, so a plain "retry after 2 s" would keep a student waiting for minutes.
+ * Each attempt therefore has its own timeout (until the first chunk for streams),
+ * and the chain is: primary model (up to 2 attempts, retry only on 429/503) ->
+ * GEMINI_FALLBACK_MODEL (1 attempt) -> local fallback reply in the caller.
+ */
+const RETRYABLE_STATUSES = new Set([429, 503]);
+// Errors that another model cannot fix (bad request, invalid or unauthorized key).
+const NON_FALLBACK_STATUSES = new Set([400, 401, 403]);
+const PRIMARY_MAX_ATTEMPTS = 2;
+const RETRY_DELAY_MS = 2_000;
+const STREAM_FIRST_CHUNK_TIMEOUT_MS = 15_000;
+const GENERATE_TIMEOUT_MS = 30_000;
+
+class GeminiTimeoutError extends Error {
+    constructor(model: string, timeoutMs: number) {
+        super(`Gemini (${model}) did not answer within ${timeoutMs} ms`);
+        this.name = 'GeminiTimeoutError';
+    }
+}
+
+class GeminiEmptyResponseError extends Error {
+    constructor(model: string) {
+        super(`Gemini (${model}) returned an empty response`);
+        this.name = 'GeminiEmptyResponseError';
+    }
+}
+
+function getGeminiStatus(error: unknown): number | undefined {
+    const status = (error as { status?: unknown } | null)?.status;
+    return typeof status === 'number' ? status : undefined;
+}
+
+function describeGeminiError(error: unknown): string {
+    if (error instanceof GeminiTimeoutError) return 'timeout';
+    if (error instanceof GeminiEmptyResponseError) return 'respuesta vacía';
+    const status = getGeminiStatus(error);
+    return status !== undefined ? `HTTP ${status}` : error instanceof Error ? error.message : String(error);
+}
+
+function getGeminiModelChain(): string[] {
+    return env.GEMINI_FALLBACK_MODEL === env.GEMINI_MODEL
+        ? [env.GEMINI_MODEL]
+        : [env.GEMINI_MODEL, env.GEMINI_FALLBACK_MODEL];
+}
+
+/**
+ * Runs `attempt` against the model chain. `attempt` receives the model name and an
+ * AbortSignal that fires on timeout or when the caller's `signal` aborts. The timeout
+ * is cleared as soon as `attempt` resolves, so a stream that already started is not cut.
+ * Returns `null` if the caller aborted; throws the last error if every model failed.
+ */
+async function callGeminiWithResilience<T>(params: {
+    label: string;
+    timeoutMs: number;
+    signal?: AbortSignal;
+    attempt: (model: string, signal: AbortSignal) => Promise<T>;
+}): Promise<T | null> {
+    const { label, timeoutMs, signal: outerSignal, attempt } = params;
+    const chain = getGeminiModelChain();
+    let lastError: unknown = null;
+
+    for (const [modelIndex, model] of chain.entries()) {
+        const maxAttempts = modelIndex === 0 ? PRIMARY_MAX_ATTEMPTS : 1;
+
+        for (let attemptNumber = 1; attemptNumber <= maxAttempts; attemptNumber += 1) {
+            if (outerSignal?.aborted) return null;
+
+            const timeoutController = new AbortController();
+            const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
+            const attemptSignal = outerSignal
+                ? AbortSignal.any([outerSignal, timeoutController.signal])
+                : timeoutController.signal;
+
+            try {
+                const value = await attempt(model, attemptSignal);
+                if (modelIndex > 0 || attemptNumber > 1) {
+                    console.warn(`[ai-tutor] ${label}: Gemini respondió con ${model} (intento ${attemptNumber}).`);
+                }
+                return value;
+            } catch (error) {
+                if (outerSignal?.aborted) return null;
+                lastError = timeoutController.signal.aborted ? new GeminiTimeoutError(model, timeoutMs) : error;
+            } finally {
+                clearTimeout(timer);
+            }
+
+            const status = getGeminiStatus(lastError);
+            const reason = describeGeminiError(lastError);
+
+            if (status !== undefined && NON_FALLBACK_STATUSES.has(status)) {
+                console.error(`[ai-tutor] ${label}: Gemini rechazó la solicitud (${reason}); no se reintenta.`);
+                throw lastError;
+            }
+
+            const canRetrySameModel =
+                attemptNumber < maxAttempts && status !== undefined && RETRYABLE_STATUSES.has(status);
+
+            if (canRetrySameModel) {
+                console.warn(
+                    `[ai-tutor] ${label}: reintentando Gemini (${model}) por ${reason} en ${RETRY_DELAY_MS / 1000} s ` +
+                        `(intento ${attemptNumber + 1}/${maxAttempts})...`,
+                );
+                try {
+                    await delay(RETRY_DELAY_MS, undefined, { signal: outerSignal });
+                } catch {
+                    return null;
+                }
+                continue;
+            }
+
+            break;
+        }
+
+        const nextModel = chain[modelIndex + 1];
+        if (nextModel) {
+            console.warn(
+                `[ai-tutor] ${label}: ${model} falló (${describeGeminiError(lastError)}); fallback al modelo ${nextModel}...`,
+            );
+        }
+    }
+
+    console.error(
+        `[ai-tutor] ${label}: todos los modelos de Gemini fallaron (${describeGeminiError(lastError)}); usando fallback local.`,
+    );
+    throw lastError;
+}
+
 /**
  * Genera el stream de tokens del Tutor IA usando `@google/generative-ai`.
- * Si falta `GEMINI_API_KEY` o falla el proveedor externo, cae al fallback pedagógico local.
+ * Si falta `GEMINI_API_KEY` o fallan el modelo principal y el de respaldo
+ * (ver `callGeminiWithResilience`), cae al fallback pedagógico local.
  */
 export async function* streamTutorResponse(params: {
     messages: readonly ChatMessage[];
@@ -275,30 +408,43 @@ export async function* streamTutorResponse(params: {
         return;
     }
 
+    const apiKey = env.GEMINI_API_KEY;
+    const genAI = new GoogleGenerativeAI(apiKey);
+    const systemInstruction = buildTutorSystemPrompt(questionContext);
+    const { history, latestMessage } = splitChatMessagesForGemini(messages);
+
     try {
-        const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
-        const systemInstruction = buildTutorSystemPrompt(questionContext);
-        const model = genAI.getGenerativeModel({
-            model: env.GEMINI_MODEL,
-            systemInstruction,
+        // Retries and model fallback only happen before the first chunk reaches the
+        // student; once text was emitted, a retry would duplicate the answer.
+        const opened = await callGeminiWithResilience({
+            label: 'chat',
+            timeoutMs: STREAM_FIRST_CHUNK_TIMEOUT_MS,
+            signal,
+            attempt: async (modelName, attemptSignal) => {
+                const model = genAI.getGenerativeModel({ model: modelName, systemInstruction });
+                const chat = model.startChat({ history });
+                const result = await chat.sendMessageStream(latestMessage, { signal: attemptSignal });
+                const iterator = result.stream[Symbol.asyncIterator]();
+
+                for (;;) {
+                    const next = await iterator.next();
+                    if (next.done) throw new GeminiEmptyResponseError(modelName);
+                    const text = next.value.text();
+                    if (text.length > 0) return { firstText: text, iterator };
+                }
+            },
         });
 
-        const { history, latestMessage } = splitChatMessagesForGemini(messages);
-        const chat = model.startChat({ history });
-        const result = await chat.sendMessageStream(latestMessage);
+        if (!opened) return;
 
-        let emittedAny = false;
-        for await (const chunk of result.stream) {
+        yield opened.firstText;
+
+        for (;;) {
             if (signal?.aborted) break;
-            const text = chunk.text();
-            if (text.length > 0) {
-                emittedAny = true;
-                yield text;
-            }
-        }
-
-        if (!emittedAny && !signal?.aborted) {
-            yield* streamTextChunks(buildFallbackTutorReply(messages, questionContext, 'provider_error'));
+            const next = await opened.iterator.next();
+            if (next.done) break;
+            const text = next.value.text();
+            if (text.length > 0) yield text;
         }
     } catch (error) {
         console.error('[ai-tutor] Error al consultar Gemini, usando fallback local:', error);
@@ -351,15 +497,24 @@ export async function generateStudyRecommendations(weakPoints: WeakPointsData): 
 
     try {
         const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
-        const model = genAI.getGenerativeModel({
-            model: env.GEMINI_MODEL,
-            systemInstruction: RECOMMENDATIONS_SYSTEM_PROMPT,
+        const prompt = buildWeakPointsSummary(weakPoints);
+
+        const text = await callGeminiWithResilience({
+            label: 'recommendations',
+            timeoutMs: GENERATE_TIMEOUT_MS,
+            attempt: async (modelName, attemptSignal) => {
+                const model = genAI.getGenerativeModel({
+                    model: modelName,
+                    systemInstruction: RECOMMENDATIONS_SYSTEM_PROMPT,
+                });
+                const result = await model.generateContent(prompt, { signal: attemptSignal });
+                const output = result.response.text().trim();
+                if (output.length === 0) throw new GeminiEmptyResponseError(modelName);
+                return output;
+            },
         });
 
-        const result = await model.generateContent(buildWeakPointsSummary(weakPoints));
-        const text = result.response.text().trim();
-
-        return text.length > 0 ? text : buildFallbackRecommendations(weakPoints);
+        return text ?? buildFallbackRecommendations(weakPoints);
     } catch (error) {
         console.error('[ai-tutor] Error al generar recomendaciones con Gemini, usando fallback local:', error);
         return buildFallbackRecommendations(weakPoints);

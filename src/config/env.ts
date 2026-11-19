@@ -44,6 +44,8 @@ const envSchema = z.object({
     GOOGLE_CLIENT_SECRET: z.string().min(1).optional(),
     GEMINI_API_KEY: z.string().trim().optional(),
     GEMINI_MODEL: z.string().trim().min(1).default('gemini-2.5-flash'),
+    // Used after GEMINI_MODEL fails (503/429/timeout/404). A "lite" model: lower demand, ~2 s to first chunk.
+    GEMINI_FALLBACK_MODEL: z.string().trim().min(1).default('gemini-3.1-flash-lite'),
     AI_DAILY_LIMIT_USER: z.coerce.number().int().positive().default(30),
     AI_DAILY_LIMIT_GUEST: z.coerce.number().int().positive().default(5),
 }).superRefine((value, ctx) => {
